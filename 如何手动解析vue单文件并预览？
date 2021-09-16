@@ -1,0 +1,570 @@
+# 开头
+
+笔者之前的文章里介绍过一个代码在线编辑预览工具的实现（传送门：[快速搭建一个代码在线编辑预览工具](https://juejin.cn/post/6965467528600485919)），实现了`css`、`html`、`js`的编辑，但是对于`demo`场景来说，`vue`单文件也是一个比较好的代码组织方式，至少笔者就经常在写`vue`项目的同时顺便写写各种`demo`，但是分享不太方便，因为单文件不能直接运行看效果，基于此，笔者决定在之前的基础上再增加一个`vue`单文件的编辑及预览功能。
+
+>  ps.如果没看过之前的文章也没关系，这里简单介绍一下该项目：[code-run](https://github.com/wanglin2/code-run)，基本框架使用的是`vue3.x`版本， 构建工具使用的是[vite](https://cn.vitejs.dev/)，代码编辑器使用的是[monaco-editor](https://microsoft.github.io/monaco-editor/)，基本原理就是把`css`、`js`、`html`拼接成完整的`html`字符串扔到`iframe`里进行预览。
+>
+>  另外项目目前存在一些坑：
+>
+>  1.`vite`不支持使用`commonjs`模块（笔者尚未找到解决方法，知道的朋友在评论区留个言？）。
+>
+>  2.三方模块目前都放在项目的`public`文件夹下，作为静态资源按需加载：
+>
+>  ![image-20210911100741819.png](https://p1-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/6522510138ae4cdbb4cc68971cb298a8~tplv-k3u1fbpfcp-watermark.image)
+>
+>  另外由于`Monaco Editor`自带的模块系统和`defined/require`冲突，导致目前需要手动修改各个三方模块，让它只支持全局对象的方式来使用，比如：
+>
+>  ![image-20210911100432541.png](https://p1-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/b615ca32eb154b1895db4a17f4cad9ae~tplv-k3u1fbpfcp-watermark.image)
+
+
+
+# 基本思路
+
+想要预览`vue`单文件，其实就是要想办法转成浏览器能认识的`css`、`js`、`html`。首先想到的是使用`vue-loader`来转换，但是看了它的文档，发现还是必须要配合`webpack`才能使用，不过笔者发现了一个配套的模块[vue-template-compiler](https://github.com/vuejs/vue/tree/dev/packages/vue-template-compiler)，它提供了一些方法，其中有一个`parseComponent`方法可以用来解析`vue单文件`，输出各个部分的内容，输出结构如下：
+
+![image-20210910174158196.png](https://p9-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/2842cc421a044763b68f5c723d982829~tplv-k3u1fbpfcp-watermark.image)
+
+所以思路就很清晰了：
+
+1.`html`部分，结构固定为：
+
+```html
+<div id="app"></div>
+```
+
+2.`css`部分，首先判断有没有使用`css`预处理器，有的话就先使用对应的解析器转换成`css`，然后再通过`style`标签插入到页面。
+
+3.`js`部分，以`vue2.x`版本为例，我们最终需要生成如下所示的结构：
+
+```js
+new Vue({
+    el: '#app',
+    template: '',// 模板部分内容
+    // ...其他选项
+})
+```
+
+`其他选项`就是`vue-template-compiler`解析出的`script.content`内容，但是单文件里基本都是`export default {}`形式的；`template`选项很简单，就是`template.content`的内容。
+
+这里的处理思路是通过`babel`来将`export default {}`的形式转换成`new Vue`的形式，然后再添加上`el`和`template`两个属性即可，这会通过写一个`babel`插件来实现。
+
+
+
+# 安装及使用vue-template-compiler
+
+首先`vue-template-compiler`模块我们也会把它放到`public`文件夹下，那么它的浏览器使用版本在哪呢？我们可以先安装它：`npm i vue-template-compiler`，然后在`node_modules`里找到它，会发现其中有一个文件：
+
+![image-20210911101252324.png](https://p6-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/f422055315ea444eb5006bd7daf25109~tplv-k3u1fbpfcp-watermark.image)
+
+这个就是我们要的，直接把它复制到`public`文件夹下（当然也要注释掉它的模块导出），然后再把该模块删除即可，之后我们便可以通过全局对象使用它：
+
+```js
+// code就是vue单文件内容字符串
+let componentData = window.VueTemplateCompiler.parseComponent(code)
+// 处理style、script、template三部分的内容，最后生成css字符串、js字符串、html字符串
+parseVueComponentData(componentData)
+```
+
+
+
+# 生成html字符串
+
+`html`部分我们要做的就是写死一个`div`，用它来挂载`vue`实例即可：
+
+```js
+const parseVueComponentData = async (data) => {
+    // html就直接渲染一个挂载vue实例的节点
+    let htmlStr = `<div id="app"></div>`
+    
+    return {
+        html: htmlStr
+    }
+}
+```
+
+
+
+# 生成css字符串
+
+`style`部分如果没有使用`css`预处理器的话那么也很简单，直接返回样式内容即可，否则需要先使用对应的预处理器把它转换成`css`：
+
+```js
+const parseVueComponentData = async (data) => {
+    // 编译css
+    let cssStr = []
+    // vue单文件的style块可以存在多个，所以解析出的styles是个数组
+    for(let i = 0; i < data.styles.length; i++) {
+        let style = data.styles[i]
+        // 如果使用了css预处理器，lang字段不为空
+        let preprocessor = style.lang || 'css'
+        if (preprocessor !== 'css') {
+            // load方法会去加载对应的三方解析模块，详情请阅读上一篇文章
+            await load([preprocessor])
+        }
+        // css方法会使用对应的解析器来解析，可参考之前的文章
+        let cssData = await css(preprocessor, style.content)
+        // 把解析后的css字符串添加到结果数组里
+        cssStr.push(cssData)
+    }
+    return {
+        // 最后把多个style块的css拼接成一个
+        css: cssStr.join('\r\n')
+    }
+}
+```
+
+上面的`css`会调用对应的`css`预处理器的解析模块来编译，比如`less`的处理如下：
+
+```js
+const css = (preprocessor, code) => {
+    return new Promise((resolve, reject) => {
+        switch (preprocessor) {
+            case 'css':
+                resolve(code)
+                break;
+            case 'less':
+                window.less.render(code)
+                    .then((output) => {
+                        resolve(output.css)
+                    },
+                    (error) => {
+                        reject(error)
+                    });
+                break;
+        }
+    })
+}
+```
+
+
+
+# 生成js字符串
+
+`script`部分的内容我们会使用`babel`来编译：
+
+```js
+const parseVueComponentData = async (data, parseVueScriptPlugin) => {
+    // babel编译，通过编写插件来完成对ast的修改
+    let jsStr = data.script ? window.Babel.transform(data.script.content, {
+        presets: [
+            'es2015',
+            'es2016',
+            'es2017',
+        ],
+        plugins: [
+            // 插件
+            parseVue2ScriptPlugin(data)
+        ]
+    }).code : ''
+
+    return {
+        js: jsStr
+    }
+}
+```
+
+`babel`插件其实就是一个函数，接收一个`babel`对象作为参数，然后需要返回一个对象，我们可以在该对象的`visitor`属性里访问到`AST`节点，并进行一些修改，`visitor`中的每个函数都接收2个参数：`path` 和 `state`，`path`表示两个节点之间连接的对象，包含节点信息及一些操作方法，插件开发的详细文档请参考：[plugin-handbook](https://github.com/jamiebuilds/babel-handbook/blob/master/translations/zh-Hans/plugin-handbook.md)。
+
+基本结构如下：
+
+```js
+const parseVue2ScriptPlugin = (data) => {
+    return function (babel) {
+        let t = babel.types
+        return {
+            visitor: {
+                
+            }
+        }
+    }
+}
+```
+
+
+
+## 转换export default语法
+
+接下来再次明确我们的需求，我们要把`export default {} `的形式转换成`new Vue`的形式，具体怎么做呢，我们可以使用[astexplorer](https://astexplorer.net/)这个工具先看看这两种结构的`AST`的差别是什么：
+
+![image-20210911105430374.png](https://p1-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/0e5905445bef47bd81bf948f78ae8898~tplv-k3u1fbpfcp-watermark.image)
+
+![image-20210911105349962.png](https://p9-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/ff5da2ff3ba94aa0b6e7d0ade01f18f8~tplv-k3u1fbpfcp-watermark.image)
+
+可以发现黄色部分都是一样的，只是外层的节点不一样，所以我们可以访问`ExportDefaultDeclaration`节点，然后把它替换成`ExpressionStatement`就行了，创建新节点也很简单，参考`AST`及[babel-types](https://babel.dev/docs/en/babel-types)文档即可。
+
+```js
+const parseVue2ScriptPlugin = (data) => {
+    return function (babel) {
+        let t = babel.types
+        return {
+            visitor: {
+                // 访问export default节点，把export default转换成new Vue
+                ExportDefaultDeclaration(path) {
+                    // 替换自身
+                    path.replaceWith(
+                        // 创建一个表达式语句
+                        t.expressionStatement(
+                            // 创建一个new表达式
+                            t.newExpression(
+                                // 创建名称为Vue的标识符，即函数名
+                                t.identifier('Vue'),
+                                // 函数参数
+                                [
+                                    // 参数就是ExportDefaultDeclaration节点的declaration属性对应的节点
+                                    path.get('declaration').node
+                                ]
+                            )
+                        )
+                    );
+                }
+            }
+        }
+    }
+}
+```
+
+效果如下：
+
+![image-20210911112037640.png](https://p6-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/0d2f2f04383a456a85497fc6b321eb6b~tplv-k3u1fbpfcp-watermark.image)
+
+到这里还没结束，`el`和`template`属性我们还没有给它加上，同样可以先在`AST`工具里面尝试一下：
+
+![image-20210911135050951.png](https://p1-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/38c246d7f11544bd87c398b003e3857f~tplv-k3u1fbpfcp-watermark.image)
+
+很明显我们需要访问`ObjectExpression`节点，然后给它的`properties`属性添加两个节点，首先想到的做法是这样的：
+
+```js
+const parseVue2ScriptPlugin = (data) => {
+    return function (babel) {
+        let t = babel.types
+        return {
+            visitor: {
+                ExportDefaultDeclaration(path) {
+                    // ...
+                },
+                ObjectExpression(path) {
+                    // 如果父节点是new语句，那么就添加该节点的properties
+                    if (path.parent && path.parent.type === 'NewExpression' ) {
+                        path.node.properties.push(
+                            // el
+                            t.objectProperty(
+                                t.identifier('el'),
+                                t.stringLiteral('#app')
+                            ),
+                            // template
+                            t.objectProperty(
+                                t.identifier('template'),
+                                t.stringLiteral(data.template.content)
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+这样做的问题是什么呢，假设我们要转换的代码是这样的：
+
+```js
+new Vue({});
+export default {
+    created() {
+        new Vue({});
+    },
+    data() {
+        return {
+            msg: "Hello world!",
+        };
+    },
+    mounted() {
+        new Vue({});
+    },
+};
+```
+
+我们想要的应该只是给`export default`这个对象添加这两个属性，但是实际效果如下：
+
+![image-20210913151421503.png](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/53078305125f4e35a44d52f06508e217~tplv-k3u1fbpfcp-watermark.image?)
+
+可以看到所有的`new`语句的对象都被修改了，这显然不是我们想要的，那么正确的方法是什么呢，我们应该在替换完`ExportDefaultDeclaration`节点后立马递归遍历该节点，并且添加完这两个属性后立即停止遍历：
+
+```js
+const parseVue2ScriptPlugin = (data) => {
+    return function (babel) {
+        let t = babel.types
+        return {
+            visitor: {
+                ExportDefaultDeclaration(path) {
+                    // export default -> new Vue
+                    // ...
+                    // 添加el和template属性
+                    path.traverse({
+                        ObjectExpression(path2) {
+                            if (path2.parent && path2.parent.type === 'NewExpression' ) {
+                                path2.node.properties.push(
+                                    // el
+                                    t.objectProperty(
+                                        t.identifier('el'),
+                                        t.stringLiteral('#app')
+                                    ),
+                                    // template
+                                    t.objectProperty(
+                                        t.identifier('template'),
+                                        t.stringLiteral(data.template.content)
+                                    ),
+                                )
+                                path2.stop()
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    }
+}
+```
+
+效果如下：
+
+![image-20210913151937284.png](https://p9-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/138cd7cba657410cb2b728586188f9b8~tplv-k3u1fbpfcp-watermark.image?)
+
+到这里，`html`、`js`、`css`三部分的内容都处理完了，我们把它们拼成完整的`html`字符串，然后扔到`iframe`里即可预览，效果如下：
+
+![image-20210913152256670.png](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/7346da6576774f1985eaa7bc63a033f5~tplv-k3u1fbpfcp-watermark.image?)
+
+
+## 转换module.exports语法
+
+除了使用`export default`语法导出，也是可用使用`module.exports = {}`的，所以我们也需要适配一下这种情况，基本套路都一样，先分析`AST`节点树的差异，然后替换节点：
+
+![image-20210913160831452.png](https://p9-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/99c0528e9eca49999805720e28b08292~tplv-k3u1fbpfcp-watermark.image?)
+
+`module.exports`本身就是一个`ExpressionStatement`，所以我们只需要访问`AssignmentExpression`节点，并替换成`new Vue`的`newExpression`节点即可：
+
+```js
+const parseVue2ScriptPlugin = (data) => {
+    return function (babel) {
+        let t = babel.types
+        return {
+            visitor: {
+                // 解析export default模块语法
+                ExportDefaultDeclaration(path) {
+                    // ...
+                },
+                // 解析module.exports模块语法
+                AssignmentExpression(path) {
+                    try {
+                        let objectNode = path.get('left.object.name')
+                        let propertyNode = path.get('left.property.name')
+                        if (
+                            objectNode 
+                            && objectNode.node === 'module' 
+                            && propertyNode 
+                            && propertyNode.node === 'exports'
+                        ) {
+                            path.replaceWith(
+                                t.newExpression(
+                                    t.identifier('Vue'),
+                                    [
+                                        path.get('right').node
+                                    ]
+                                )
+                            )
+                            // 添加el和template属性
+                            // 逻辑同上
+                        }
+                    } catch (error) {
+                        console.log(error)
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+当然，这样写如果存在多个`module.exports = {}`语句是会出错的，不过这种场景应该不常见，我们就不管了。
+
+
+
+# 其他工具的做法
+
+社区上有一些工具可以用来在浏览器端支持`.vue`文件的加载及使用，比如[http-vue-loader](https://github.com/FranckFreiburger/http-vue-loader)，使用方式如下：
+
+```html
+<!doctype html>
+<html lang="en">
+  <head>
+    <script src="https://unpkg.com/vue"></script>
+    <script src="https://unpkg.com/http-vue-loader"></script>
+  </head>
+
+  <body>
+    <div id="my-app">
+      <my-component></my-component>
+    </div>
+
+    <script type="text/javascript">
+      new Vue({
+        el: '#my-app',
+        components: {
+          'my-component': httpVueLoader('my-component.vue')
+        }
+      });
+    </script>
+  </body>
+</html>
+```
+
+接下来按它的原理我们再来实现一遍。
+
+我们先不管样式，看一下基本的`html`和`js`部分：
+
+```js
+const parseVueComponentData2 = (data) => {
+    let htmlStr = `
+        <div id="app">
+            <vue-component></vue-component>
+        </div>
+    `
+    // 把vue单文件字符串里的/转成\/是因为如果不转，那么浏览器会错把模板里的标签当成页面的实际标签，会造成页面解析错误
+    let jsStr = `
+        new Vue({
+            el: '#app',
+            components: {
+                'vue-component': VueLoader(\`${data.replaceAll('/', '\\/')}\`)
+            }
+        });
+    `
+    return {
+        html: htmlStr,
+        js: jsStr,
+        css: ''
+    }
+}
+```
+
+可以看到我们这次把`vue`单文件当成一个组件来使用，然后我们要实现一个全局方法`VueLoader`，接收单文件的内容，返回一个组件选项对象。
+
+接下来我们不使用`vue-template-compiler`，而是自己来解析，原理是创建一个新的`HTML`文档，然后把`vue`单文件的内容扔到该文档的`body`节点，然后再遍历`body`节点的子节点，根据标签名来判断各个部分：
+
+```js
+// 全局方法
+window.VueLoader = (str) => {
+    let {
+        templateEl,
+        scriptEl,
+        styleEls
+    } = parseBlock(str)
+}
+
+// 解析出vue单文件的各个部分，返回对应的节点 
+const parseBlock = (str) => {
+    // 创建一个新的HTML文档
+    let doc = document.implementation.createHTMLDocument('');
+    // vue单文件的内容添加到body节点下
+    doc.body.innerHTML = str
+    let templateEl = null
+    let scriptEl = null
+    let styleEls = []
+    // 遍历body节点的子节点
+    for (let node = doc.body.firstChild; node; node = node.nextSibling) {
+        switch (node.nodeName) {
+            case 'TEMPLATE':
+                templateEl = node
+                break;
+            case 'SCRIPT':
+                scriptEl = node
+                break;
+            case 'STYLE':
+                styleEls.push(node)
+                break;
+        }
+    }
+    return {
+        templateEl,
+        scriptEl,
+        styleEls
+    }
+}
+```
+
+![image-20210913181743922.png](https://p6-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/65e274aa93e54646b9284c5ab0415ee5~tplv-k3u1fbpfcp-watermark.image?)
+
+接下来解析`script`块的内容，我们最终是要返回一个选项对象，也就是这样的：
+
+```js
+{
+    name: 'vue-component',
+    data () {
+        return {
+            msg: 'Hello world!'
+        }
+    },
+    template: ''
+}
+```
+
+然后再看看上面的截图，你应该有想法了，我们可以手动创建一个`module.exports`对象，然后让`script`的代码运行时能访问到该对象，那么不就相当于把这个选项对象赋值到我们定义的`module.exports`对象上了吗。
+
+```js
+window.VueLoader = (str) => {
+    // ...
+    let options = parseScript(scriptEl)
+}
+
+// 解析script
+const parseScript = (el) => {
+    let str = el.textContent
+    let module = {
+        exports: {}
+    }
+    let fn = new Function('exports', 'module', str)
+    fn(module.exports, module)
+    return module.exports
+}
+```
+
+![image-20210913183203423.png](https://p6-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/3b6c83c08c384431a5a3b516d7d401fd~tplv-k3u1fbpfcp-watermark.image?)
+
+接下来再把模板选项和组件名称添加到该对象上，最后返回该对象即可：
+
+```js
+window.VueLoader = (str) => {
+    // ...
+    options.template = parseTemplate(templateEl)
+    options.name = 'vue-component'
+    return options
+}
+
+// 返回模板内容字符串
+const parseTemplate = (el) => {
+    return el.innerHTML
+}
+```
+
+`css`部分的解析和之前我们的做法是一样的，这里不再赘述，但是`http-vue-loader`还实现了样式的`scoped`处理。
+
+这个工具的一个缺点是不支持`export default`模块语法。
+
+
+# 参考链接
+
+最终效果预览：[https://wanglin2.github.io/code-run-online/](https://wanglin2.github.io/code-run-online/)。
+
+完整代码请移步项目仓库：[https://github.com/wanglin2/code-run](https://github.com/wanglin2/code-run)。
+
+[快速搭建一个代码在线编辑预览工具](https://juejin.cn/post/6965467528600485919)
+
+[astexplorer](https://astexplorer.net/)
+
+[http-vue-loader](https://github.com/FranckFreiburger/http-vue-loader)
+
+[Babel plugin-handbook](https://github.com/jamiebuilds/babel-handbook/blob/master/translations/zh-Hans/plugin-handbook.md)
+
+[vue-template-compiler](https://github.com/vuejs/vue/tree/dev/packages/vue-template-compiler)
+
+[babel-types](https://babel.dev/docs/en/babel-types)
+
