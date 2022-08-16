@@ -1,0 +1,510 @@
+上一篇[我做了一个在线白板！](https://juejin.cn/post/7091276963146530847)给大家介绍了一下矩形的绘制、选中、拖动、旋转、伸缩，以及放大缩小、网格模式、导出图片等功能，本文继续为各位介绍一下箭头的绘制、自由书写、文字的绘制，以及如何按比例缩放文字图片等这些需要固定长宽比例的图形、如何缩放自由书写折线这些由多个点构成的元素。
+
+# 箭头的绘制
+
+箭头其实就是一根线段，只是一端存在两根成一定角度的小线段，给定两个端点的坐标即可绘制一条线段，关键是如何计算出另外两根小线段的坐标，箭头线段和线段的夹角我们设置为`30度`，长度设置为`30px`：
+
+```js
+let l = 30;
+let deg = 30;
+```
+
+
+
+
+![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/ac45be15c725415e80ab1274f332bab1~tplv-k3u1fbpfcp-zoom-1.image)
+
+
+如图所示，已知线段的两个端点坐标为：`(x,y)`、`(tx,ty)`，箭头的两根小线段有一个头是和线段`(tx,ty)`重合的，所以我们只要求出`(x1,y1)`和`(x2,y2)`即可。
+
+先来看`(x1,y1)`：
+
+
+![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/19b453591de048139af0304543575ec8~tplv-k3u1fbpfcp-zoom-1.image)
+
+
+首先我们可以使用`Math.atan2`函数计算出线段和水平线的夹角`A`，`atan2`函数可以计算任意一个点`（x, y）`和原点`（0, 0）`的连线与`X`轴正半轴的夹角大小，我们可以把线段的`(x,y)`当做原点，那么`(tx,ty)`对应的坐标就是`(tx-x, ty-y)`，那么可以求出夹角`A`为：
+
+```js
+let lineDeg = radToDeg(Math.atan2(ty - y, tx - x));// atan2计算出来为弧度，需要转成角度
+```
+
+那么线段另一侧与`X`轴的夹角也是`A`：
+
+
+![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/9aaf04ae9d2e483688bb025fcfa31528~tplv-k3u1fbpfcp-zoom-1.image)
+
+
+已知箭头线段和线段的夹角为`30度`，那么两者相减就可以计算出箭头线段和`X`轴的夹角`B`：
+
+```js
+let plusDeg = deg - lineDeg;
+```
+
+箭头线段作为斜边，可以和`X`轴形成一个直角三角形，然后使用勾股定理就可以计算出对边`L2`和邻边`L1`：
+
+
+![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/38b3dbf42125471e8f94ffdafe08adf1~tplv-k3u1fbpfcp-zoom-1.image)
+
+
+
+```js
+let l1 = l * Math.sin(degToRad(plusDeg));// 角度要先转成弧度
+let l2 = l * Math.cos(degToRad(plusDeg));
+```
+
+最后，我们将`tx`减去`L2`即可得到`x1`的坐标，`ty`加上`L1`即可得到`y1`的坐标：
+
+```js
+let _x = tx - l2
+let _y = ty + l1
+```
+
+计算另一侧的`(x2,y2)`坐标也是类似，我们可以先计算出和`Y`轴的夹角，然后同样是勾股定理计算出对边和邻边，再使用`(tx,ty)`坐标相减：
+
+
+![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/fcf29d1e93904b4c98fe1906d26f4a32~tplv-k3u1fbpfcp-zoom-1.image)
+
+
+角度`B`为：
+
+```js
+let plusDeg = 90 - lineDeg - deg;
+```
+
+`(x2,y2)`坐标计算如下：
+
+```js
+let _x = tx - l * Math.sin(degToRad(plusDeg));// L1
+let _y = ty - l * Math.cos(degToRad(plusDeg));// L2
+```
+
+# 自由书写
+
+自由书写很简单，监听鼠标移动事件，记录下移动到的每个点，用线段绘制出来即可，线段的宽度我们暂且设置为`2px`：
+
+```js
+const lastMousePos = {
+    x: null,
+    y: null
+}
+const onMouseMove = (e) => {
+    if (lastMousePos.x !== null && lastMousePos.y !== null) {
+        ctx.beginPath();
+        ctx.lineWidth = 2;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.moveTo(lastMousePos.x, lastMousePos.y);
+        ctx.lineTo(e.clientX, e.clientY);
+        ctx.stroke();
+    }
+    lastMousePos.x = e.clientX;
+    lastMousePos.y = e.clientY;
+}
+```
+
+![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/2b32b5cc8ebd4a43844b1663fc50ce39~tplv-k3u1fbpfcp-zoom-1.image)
+
+
+这样画出来的线段是粗细都是一样的，和现实情况其实并不相符，写过毛笔字的朋友应该更有体会，速度慢的时候画的线会粗一点，画的速度快线段会细一点，所以我们可以结合速度来动态设置线段的宽度。
+
+先计算出鼠标当前时刻的速度：
+
+```js
+let lastMouseTime = null;
+const onMouseMove = (e) => {
+    if (lastMousePos.x !== null && lastMousePos.y !== null) {
+        // 使用两点距离公式计算出鼠标这一次和上一次的移动距离
+        let mouseDistance = getTowPointDistance(
+            e.clientX,
+            e.clientY,
+            lastMousePos.x,
+            lastMousePos.y
+        );
+        // 计算时间
+        let curTime = Date.now();
+        let mouseDuration = curTime - lastMouseTime;
+        // 计算速度
+        let mouseSpeed = mouseDistance / mouseDuration;
+        // 更新时间
+        lastMouseTime = curTime;
+    }
+	// ...
+}
+```
+
+看一下计算出来的速度：
+
+
+![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/884a9f8dbe654aa48ece0e1d6bb313d4~tplv-k3u1fbpfcp-zoom-1.image)
+
+
+我们取`10`作为最大的速度，`0.5`作为最小的速度，同样线段的宽度也设定一个最大和最小宽度，太大和太小实际观感其实都不太好，那么当速度大于最大的速度，宽度就设为最小宽度；小于最小的速度，宽度就设为最大的宽度，处于中间的速度，宽度我们就按比例进行计算：
+
+```js
+// 动态计算线宽
+const computedLineWidthBySpeed = (speed) => {
+    let lineWidth = 0;
+    let minLineWidth = 2;
+    let maxLineWidth = 4;
+    let maxSpeed = 10;
+    let minSpeed = 0.5;
+    // 速度超快，那么直接使用最小的笔画
+    if (speed >= maxSpeed) {
+        lineWidth = minLineWidth;
+    } else if (speed <= minSpeed) {
+        // 速度超慢，那么直接使用最大的笔画
+        lineWidth = maxLineWidth;
+    } else {
+        // 中间速度，那么根据速度的比例来计算
+        lineWidth = maxLineWidth -
+      ((speed - minSpeed) / (maxSpeed - minSpeed)) * maxLineWidth;
+    }
+    return lineWidth;
+};
+```
+
+中间速度的比例计算也很简单，计算当前速度相对于最大速度的比值，乘以最大宽度，因为速度和宽度是成反比的，所以用最大宽度相减计算出该速度对应的宽度。
+
+![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/3bbc9c2d81e94b8fbe0c81e2605bab35~tplv-k3u1fbpfcp-zoom-1.image)
+
+
+可以看到速度慢的时候确实是宽的，速度快的时候确实也是细的，但是这个宽度变化是跳跃的，很突兀，也无法体现出是一个渐变的过程，解决方法很简单，因为是相对于上一次的线条来说差距过大，所以我们可以把这一次计算出来的宽度和上一次的宽度进行中和，比如各区一半作为本次的宽度：
+
+```js
+const computedLineWidthBySpeed = (speed, lastLineWidth = -1) => {
+    // ...
+    if (lastLineWidth === -1) {
+        lastLineWidth = maxLineWidth;
+    }
+    // 最终的粗细为计算出来的一半加上上一次粗细的一半，防止两次粗细相差过大，出现明显突变
+    return lineWidth * (1 / 2) + lastLineWidth * (1 / 2);
+}
+```
+
+![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/82cca5666af94c5dbaabfea57de8d05d~tplv-k3u1fbpfcp-zoom-1.image)
+
+
+虽然仔细看还是能看出来突变，但相比之前还是好了很多。
+
+# 文字的绘制
+
+文字的输入是通过`input`标签实现的。
+
+当绘制新文字时，创建一个无边框无背景的`input`元素，通过固定定位显示在鼠标所点击的位置，然后自动获取焦点，监听输入事件，实时计算输入的文字大小动态更新文本框的宽高，达到可以一直输入的效果，当失去焦点时隐藏文本框，将输入的文本通过`canvas`绘制出来即可。
+
+点击某个文字进行编辑时，需要获取到该文字、及对应的样式，如字号、字体、行高、颜色等，然后在`canvas`画布上隐藏该文字，将文本框定位到该位置，设置文字内容，并且也设置对应的样式，尽量看起来像是原地编辑，而不是另外创建了一个输入框来进行编辑：
+
+```js
+// 显示文本编辑框
+showTextEdit() {
+    if (!this.editable) {
+        // 输入框不存在，创建一个
+        this.crateTextInputEl();
+    } else {
+        // 已创建则让它显示
+        this.editable.style.display = "block";
+    }
+    // 更新文本框样式
+    this.updateTextInputStyle();
+    // 聚焦
+    this.editable.focus();
+}
+
+// 创建文本输入框元素
+crateTextInputEl() {
+    this.editable = document.createElement("textarea");
+    // 设置样式，让我们看不见
+    Object.assign(this.editable.style, {
+        position: "fixed",
+        display: "block",
+        minHeight: "1em",
+        backfaceVisibility: "hidden",
+        margin: 0,
+        padding: 0,
+        border: 0,
+        outline: 0,
+        resize: "none",
+        background: "transparent",
+        overflow: "hidden",
+        whiteSpace: "pre",
+    });
+    // 监听事件
+    this.editable.addEventListener("input", this.onTextInput);
+    this.editable.addEventListener("blur", this.onTextBlur);
+    // 插入到页面
+    document.body.appendChild(this.editable);
+}
+```
+
+通过`input`事件来监听输入，获取到输入的文本，计算文本的宽高，文本是可以换行的，所以整体的宽度为最长那行文字的宽度，宽度的计算通过创建一个`div`元素将文本塞进去，设置样式，然后使用`getBoundingClientRect`获取`div`的宽度，也就是文字的宽度：
+
+```js
+// 文本输入事件
+onTextInput() {
+    // 当前新建或编辑的文本元素
+    let activeElement = this.app.elements.activeElement;
+    // 实时更新文本
+    activeElement.text = this.editable.value;
+    // 计算文本的宽高
+    let { width, height } = getTextElementSize(activeElement);
+    // 更新文本元素的宽高
+    activeElement.width = width;
+    activeElement.height = height;
+    // 根据当前文本元素更新输入框的样式
+    this.updateTextInputStyle();
+}
+```
+
+实时更新文本元素的信息，用于后续通过`canvas`进行渲染，接下来看一下`getTextElementSize`的实现：
+
+```js
+// 计算一个文本元素的宽高
+export const getTextElementSize = (element) => {
+    let { text, style } = element;// 取出文字和样式数据
+    let width = getWrapTextActWidth(element);// 获取文本的最大宽度
+    const lines = Math.max(splitTextLines(text).length, 1);// 文本的行数
+    let lineHeight = style.fontSize * style.lineHeightRatio;// 计算出行高
+    let height = lines * lineHeight;// 行数乘行高计算出文本整体高度
+    return {
+        width,
+        height,
+    };
+};
+```
+
+文本的宽和高分成了两部分进行计算，高度直接是行数和行高相乘得到，看一下计算宽度的逻辑：
+
+```js
+// 计算换行文本的实际宽度
+export const getWrapTextActWidth = (element) => {
+    let { text } = element;
+    let textArr = splitTextLines(text);// 将文字切割成行数组
+    let maxWidth = -Infinity;
+    // 遍历每行计算宽度
+    textArr.forEach((textRow) => {
+        // 计算某行文字的宽度
+        let width = getTextActWidth(textRow, element.style);
+        if (width > maxWidth) {
+            maxWidth = width;
+        }
+    });
+    return maxWidth;
+};
+
+// 文本切割成行
+export const splitTextLines = (text) => {
+    return text.replace(/\r\n?/g, "\n").split("\n");
+};
+
+// 计算文本的实际渲染宽度
+let textCheckEl = null;
+export const getTextActWidth = (text, style) => {
+    if (!textCheckEl) {
+        // 创建一个div元素
+        textCheckEl = document.createElement("div");
+        textCheckEl.style.position = "fixed";
+        textCheckEl.style.left = "-99999px";
+        document.body.appendChild(textCheckEl);
+    }
+    let { fontSize, fontFamily } = style;
+    // 设置文本内容、字号、字体
+    textCheckEl.innerText = text;
+    textCheckEl.style.fontSize = fontSize + "px";
+    textCheckEl.style.fontFamily = fontFamily;
+    // 通过getBoundingClientRect获取div的宽度
+    let { width } = textCheckEl.getBoundingClientRect();
+    return width;
+};
+```
+
+文字的宽高也计算出来了，最后我们来看一下更新文本框的方法：
+
+```js
+// 根据当前文字元素的样式更新文本输入框的样式
+updateTextInputStyle() {
+    let activeElement = this.app.elements.activeElement;
+    let { x, y, width, height, style, text, rotate } = activeElement;
+    // 设置文本内容
+    this.editable.value = text;
+    let styles = {
+        font: getFontString(fontSize, style.fontFamily),// 设置字号及字体
+        lineHeight: `${fontSize * style.lineHeightRatio}px`,// 设置行高
+        left: `${x}px`,// 定位
+        top: `${y}px`,
+        color: style.fillStyle,// 设置颜色
+        width: Math.max(width, 100) + "px",// 设置为文本的宽高
+        height: height * state.scale + "px",
+        transform: `rotate(${rotate}deg)`,// 文本元素旋转了，输入框也需要旋转
+        opacity: style.globalAlpha,// 设置透明度
+    };
+    Object.assign(this.editable.style, styles);
+}
+
+// 拼接文字字体字号字符串
+export const getFontString = (fontSize, fontFamily) => {
+  return `${fontSize}px ${fontFamily}`;
+};
+```
+
+![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/629c86fb2cc24546a6bab908173d14f9~tplv-k3u1fbpfcp-zoom-1.image)
+
+
+
+# 伸缩图片和文字
+
+图片和文字都属于是宽高比例固定的元素，那么伸缩时就需要保持原比例，上一篇文章里介绍的伸缩方法是不能保持比例的，所以需要进行一定修改，距离上一篇已经过了这么久的时间，大家肯定都忘了伸缩的逻辑，可以先复习一下：[2.第二步，修理它](https://juejin.cn/post/7091276963146530847#heading-4)（往下滚动到【伸缩矩形】小小节）。
+
+总结来说就是一个矩形的绘制需要`x,y,width,height,rotate`五个属性，伸缩不会影响旋转，所以计算伸缩后的矩形也就是计算新的`x,y,width,height`值，这里也简单列一下步骤：
+
+1.根据矩形的中心点计算鼠标拖动的角的对角点坐标，比如我们拖动的是矩形的右下角，那么对角点就是左上角；
+
+2.根据鼠标拖动到的实时位置结合对角点坐标，计算出新矩形的中心点坐标；
+
+3.获取鼠标实时坐标经新的中心点反向旋转原始矩形的旋转角度后的坐标；
+
+4.知道了未旋转时的右下角坐标，以及新的中心点坐标，那么新矩形的左上角坐标、宽、高都可以轻松计算出来；
+
+接下来看一下如何按比例伸缩。
+
+
+
+
+![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/c4309daf933c4ff2832f3f11ccb38a47~tplv-k3u1fbpfcp-zoom-1.image)
+
+
+黑色的为原始矩形，绿色的为鼠标按住右下角实时拖动后的矩形，这个是没有保持原宽高比的，拖动到这个位置如果要保持宽高比应该为红色所示的矩形。
+
+根据之前的逻辑，我们是可以计算出绿色矩形未旋转前的位置和宽高的，那么新的比例也可以计算出来，再根据原始矩形的宽高比例，我们可以计算出红色矩形未旋转前的位置和宽高：
+
+
+![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/872ac7a798844442afecc6fc3fa81ed0~tplv-k3u1fbpfcp-zoom-1.image)
+
+
+如图所示，我们先计算出实时拖动后的绿色矩形未旋转时的位置和宽高`newRect`，假设原始矩形的宽高比为`2`，新矩形的宽高比为`1`，新的小于旧的，那么如果要比例相同，需要调整新矩形的高度，反之调整新矩形的宽度，计算的等式为：
+
+```
+newRect.width / newRect.height = originRect.width / originRect.height
+```
+
+那么我们就可以计算出红色矩形的右下角坐标：
+
+```js
+let originRatio = originRect.width / originRect.height;// 原始矩形的宽高比
+let newRatio = newRect.width / newRect.height;// 新矩形的宽高比
+let x1, y1
+if (newRatio < originRatio) {// 新矩形的比例小于原始矩形的比例，宽度不变，调整新矩形的高度
+    x1 = newRect.x + newRect.width;
+    y1 = newRect.y + newRect.width / originRatio;
+} else if (newRatio > originRatio) {// 新矩形的比例大于原始矩形的比例，高度不变，调整新矩形的宽度
+    x1 = newRect.x + originRatio * newRect.height;
+    y1 = newRect.y + newRect.height;
+}
+```
+
+红色矩形未旋转时的右下角坐标计算出来了，那么我们要把它以新中心点旋转原始矩形的角度：
+
+![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/36c14760bff24286b9d9f3cb705349f5~tplv-k3u1fbpfcp-zoom-1.image)
+
+
+到这一步，你是不是会发现好像似曾相识，没错，忽略绿色的矩形，想象成我们鼠标是拖动到了红色矩形右下角的位置，那么只要再从头进行一下最开始提到的4个步骤就可以计算出红色矩形未旋转前的位置和宽高，也就是按比例伸缩后的矩形的位置和宽高。详细代码请参考：[https://github.com/wanglin2/tiny_whiteboard/blob/main/tiny-whiteboard/src/elements/DragElement.js#L280](https://github.com/wanglin2/tiny_whiteboard/blob/main/tiny-whiteboard/src/elements/DragElement.js#L280)。
+
+对于图片的话上面的步骤就足够了，因为图片的大小就是宽和高，但是对于文字来说，它的大小是字号，所以我们还得把计算出的宽高转换成字号，笔者的做法是：
+
+```
+新字号 = 新高度 / 行数 / 行高比例
+```
+
+代码如下：
+
+```js
+let fontSize = Math.floor(
+    height / splitTextLines(text).length / style.lineHeightRatio
+);
+this.style.fontSize = fontSize;
+```
+
+比如一段文字有`2`行，行高为`1.5`，计算出的新高度为`60`，那么不考虑行高计算出的字号就是`30`，考虑行高，显然字号会小于`30`，`x * 1.5 = 30`，所以还需要再除以行高比。
+
+![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/28890e2c9a2f419ca92c9d27bf8e12ca~tplv-k3u1fbpfcp-zoom-1.image)
+
+
+
+# 缩放多边形或折线
+
+我们的伸缩操作计算出的是一个新矩形的位置和宽高，对于由多个点构成的元素（比如多边形、折线、手绘线）来说这个矩形就是它们的最小包围框：
+
+
+![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/25214dc2122548e5acc0616d065b40d2~tplv-k3u1fbpfcp-zoom-1.image)
+
+
+所以我们只要能根据新的宽高缩放元素的每个点就可以了：
+
+```js
+// 更新元素包围框
+updateRect(x, y, width, height) {
+    let { startWidth, startHeight, startPointArr } = this;// 元素初始的包围框宽高、点位数组
+    // 计算新宽高相对于原始宽高的缩放比例
+    let scaleX = width / startWidth;
+    let scaleY = height / startHeight;
+    // 元素的所有点位都进行同步缩放
+    this.pointArr = startPointArr.map((point) => {
+        let nx = point[0] * scaleX;
+        let ny = point[1] * scaleY;
+        return [nx, ny];
+    });
+    // 更新元素包围框
+    this.updatePos(x, y);
+    this.updateSize(width, height);
+    return this;
+}
+```
+
+![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/3d25046329fb40cf9bfa41c6f552ef83~tplv-k3u1fbpfcp-zoom-1.image)
+
+
+可以看到元素飞走了，其实缩放的大小是正确的，我们把框拖过去进行一下对比：
+
+
+![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/86e70f1c2a314f8b96f7914ea9c0962d~tplv-k3u1fbpfcp-zoom-1.image)
+
+
+所以只是发生了位移，这个位移是怎么发生的呢，其实很明显，比如一个线段的两个点的坐标为`(1,1)`、`(1,3)`，放大`2`倍后变成了`(2,2)`、`(2,6)`，很明显线段被是放大拉长了，但是同样也很明显位置变了：
+
+
+![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/579a03d6aa764e538439b16e2549e704~tplv-k3u1fbpfcp-zoom-1.image)
+
+
+解决方法是我们可以计算出元素新的包围框，然后计算出和原来包围框的距离，最后缩放后的所有点位都往回偏移这个距离即可：
+
+```js
+// 更新元素包围框
+updateRect(x, y, width, height) {
+    // ...
+    // 缩放后会发生偏移，所以计算一下元素的新包围框和原来包围框的差距，然后整体往回偏移
+    let rect = getBoundingRect(this.pointArr);
+    let offsetX = rect.x - x;
+    let offsetY = rect.y - y;
+    this.pointArr = this.pointArr.map((point) => {
+        return [point[0] - offsetX, point[1] - offsetY, ...point.slice(2)];
+    });
+    this.updatePos(x, y);
+    this.updateSize(width, height);
+    return this;
+}
+```
+
+![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/cecf7b6c8f4d45d6a430c3ec06e12df6~tplv-k3u1fbpfcp-zoom-1.image)
+
+
+# 总结
+
+到这里这个小项目的一些核心实现也就都介绍完了，当然这个项目还是存在很大的不足，比如：
+
+1.元素的点击检测完全是依赖于点到点的距离或点到直线的距离，这就导致不支持像贝塞尔曲线或是椭圆这样的元素，因为无法知道曲线上每个点的坐标，自然也无法比较；
+
+2.多个元素同时旋转目前也没有很好的解决；
+
+3.不支持镜像伸缩；
+
+项目地址：[https://github.com/wanglin2/tiny_whiteboard](https://github.com/wanglin2/tiny_whiteboard)，欢迎给个star~
